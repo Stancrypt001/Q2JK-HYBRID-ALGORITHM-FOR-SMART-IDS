@@ -1,6 +1,6 @@
 # 🛡️ Smart Intrusion Detection System (IDS) with YOLO & OpenCV
 
-An AI-powered Smart Intrusion Detection System built with Python, OpenCV, YOLOv8, and Flask. This project processes live video streams, tracks object intrusion streaks, generates real-time visual overlays, maintains local FIFO image storage, and sends instant alert notifications to Telegram (with offline queue support).
+An AI-powered Smart Intrusion Detection System built with Python, OpenCV, YOLOv8, and Flask. This project processes live video streams, tracks object intrusion streaks, generates real-time visual overlays and maintains local FIFO image storage, and sends instant alert notifications to Telegram (with offline queue support).
 
 ---
 
