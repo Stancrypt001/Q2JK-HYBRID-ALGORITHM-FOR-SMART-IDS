@@ -4,3 +4,4 @@ __pycache__/
 offline_alert_queue.json
 captured_events/
 .env
+yolov8n.pt
