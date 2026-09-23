@@ -1,119 +1,92 @@
-import sys
-import cv2
-import numpy as np
 import os
+import sys
 import glob
 import time
 import json
+import threading
 import requests
-from threading import Thread, Lock
-from flask import Flask, render_template_string, Response, jsonify, request
+import cv2
+import numpy as np
+from flask import Flask, render_template, Response, jsonify, request
 from ultralytics import YOLO
 
-app = Flask(__name__)
+# --- ENVIRONMENT & CONFIGURATION ---
 
-# System State & Locks
-lock = Lock()
-cap = None
-current_camera_index = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 0
+def load_env_file(filepath=".env"):
+    """Lightweight .env loader without requiring external third-party dotenv package."""
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        os.environ.setdefault(k.strip(), v.strip())
+        except Exception as e:
+            print(f"[WARN] Could not parse .env file: {e}")
 
-# Configuration Parameters
-CONFIDENCE_THRESHOLD = 0.50
-REQUIRED_STREAK = 3
-MAX_STORAGE_FILES = 10
+load_env_file()
+
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID_HERE")
+CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", 0.50))
+REQUIRED_STREAK = int(os.getenv("REQUIRED_STREAK", 3))
+ALERT_COOLDOWN = float(os.getenv("ALERT_COOLDOWN", 10))
+MAX_STORAGE_FILES = int(os.getenv("MAX_STORAGE_FILES", 10))
+DEFAULT_CAM_INDEX = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else int(os.getenv("DEFAULT_CAMERA_INDEX", 0))
+
 STORAGE_DIR = "captured_events"
-
-BOT_TOKEN = "8972666318:AAEGqEo1GBUcOJJe1E6OVydRbylC2Ho-fRU"
-CHAT_ID = "-1004435269123"
 QUEUE_FILE = "offline_alert_queue.json"
-
 os.makedirs(STORAGE_DIR, exist_ok=True)
 
-# Intrusion Tracker State
-streak_count = 0
-last_alert_time = 0
-ALERT_COOLDOWN = 10
-latest_logs = []
+# --- FLASK APP INITIALIZATION ---
+app = Flask(__name__, template_folder="templates")
 
-# Load YOLO Model
-model = YOLO('yolov8n.pt')
+# Synchronization Locks
+state_lock = threading.Lock()
+queue_lock = threading.Lock()
+camera_lock = threading.Lock()
+
+# Global State
+latest_logs = []
 
 def add_log(msg):
     global latest_logs
     timestamp = time.strftime("%H:%M:%S")
     entry = f"[{timestamp}] {msg}"
     print(entry)
-    with lock:
+    with state_lock:
         latest_logs.append(entry)
-        if len(latest_logs) > 15:
+        if len(latest_logs) > 25:
             latest_logs.pop(0)
 
-# --- SAFE CAMERA ENGINE & SCANNING (WITH TTL CACHING) ---
+# --- STORAGE & OFFLINE QUEUE HARDENING ---
 
-def release_camera_safely():
-    """Safely releases the active VideoCapture object without crashing."""
-    global cap
-    if cap is not None:
+def get_queued_image_paths():
+    """Returns set of image paths currently referenced in offline queue to prevent premature deletion."""
+    with queue_lock:
+        if not os.path.exists(QUEUE_FILE):
+            return set()
         try:
-            if cap.isOpened():
-                cap.release()
-        except Exception as e:
-            add_log(f"Camera Release Error: {e}")
-        finally:
-            cap = None
-
-def get_camera_stream(index):
-    """Attempts MSMF backend first (ideal for Windows & Iriun), then falls back."""
-    release_camera_safely()
-    capture = cv2.VideoCapture(index, cv2.CAP_MSMF)
-    if not capture.isOpened():
-        capture = cv2.VideoCapture(index)
-    return capture
-
-def get_available_cameras(max_tested=10):
-    """Scans hardware and virtual indices safely using MSMF."""
-    active_cams = []
-    add_log("Scanning for active camera feeds...")
-    for index in range(max_tested):
-        temp_cap = cv2.VideoCapture(index, cv2.CAP_MSMF)
-        if not temp_cap.isOpened():
-            temp_cap = cv2.VideoCapture(index)
-            
-        if temp_cap.isOpened():
-            ret, frame = temp_cap.read()
-            if ret and frame is not None and frame.size > 0:
-                mean_val = np.mean(frame)
-                std_val = np.std(frame)
-                if mean_val > 5 and std_val > 2:
-                    active_cams.append({
-                        "index": index,
-                        "status": "Active Feed",
-                        "resolution": f"{frame.shape[1]}x{frame.shape[0]}",
-                        "brightness": round(float(mean_val), 1)
-                    })
-            temp_cap.release()
-    return active_cams
-
-# Simple TTL Camera Cache to prevent freezing during frequent camera polling
-_camera_cache = {"data": None, "ts": 0}
-
-def get_available_cameras_cached(max_tested=10, ttl=10):
-    """Cache camera scans for 10 seconds to avoid repeating expensive hardware probes."""
-    now = time.time()
-    if _camera_cache["data"] is None or (now - _camera_cache["ts"]) > ttl:
-        _camera_cache["data"] = get_available_cameras(max_tested)
-        _camera_cache["ts"] = now
-    return _camera_cache["data"]
-
-# --- STORAGE & TELEGRAM ALERT ENGINE ---
+            with open(QUEUE_FILE, "r", encoding="utf-8") as f:
+                items = json.load(f)
+                return {item.get("image_path") for item in items if item.get("image_path")}
+        except Exception:
+            return set()
 
 def enforce_fifo_storage():
+    """Enforces storage ceiling while protecting any image currently pending in offline queue."""
+    queued_paths = get_queued_image_paths()
     files = sorted(glob.glob(os.path.join(STORAGE_DIR, "*.jpg")), key=os.path.getmtime)
-    while len(files) > MAX_STORAGE_FILES:
-        oldest_file = files.pop(0)
+    
+    deletable_files = [f for f in files if os.path.abspath(f) not in {os.path.abspath(p) for p in queued_paths}]
+    
+    while len(files) > MAX_STORAGE_FILES and deletable_files:
+        oldest_file = deletable_files.pop(0)
+        files.remove(oldest_file)
         try:
             os.remove(oldest_file)
-            add_log(f"FIFO Purge: Removed old image {os.path.basename(oldest_file)}")
+            add_log(f"FIFO Purge: Removed old snapshot {os.path.basename(oldest_file)}")
         except Exception as e:
             add_log(f"FIFO Error: {e}")
 
@@ -124,7 +97,8 @@ def check_internet(url="https://api.telegram.org"):
         return False
 
 def send_alert_payload(alert):
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+    """Sends Telegram alert with explicit network timeout to prevent thread hangs."""
+    if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         add_log(f"[SIMULATED ALERT] {alert['message']}")
         return True
 
@@ -133,69 +107,172 @@ def send_alert_payload(alert):
         if img_path and os.path.exists(img_path):
             url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
             with open(img_path, 'rb') as photo:
-                res = requests.post(url, data={'chat_id': CHAT_ID, 'caption': alert["message"]}, files={'photo': photo})
+                res = requests.post(
+                    url,
+                    data={'chat_id': CHAT_ID, 'caption': alert["message"]},
+                    files={'photo': photo},
+                    timeout=10
+                )
         else:
             url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-            res = requests.post(url, data={'chat_id': CHAT_ID, 'text': alert["message"]})
+            res = requests.post(
+                url,
+                data={'chat_id': CHAT_ID, 'text': alert["message"]},
+                timeout=10
+            )
         return res.status_code == 200
     except Exception as e:
         add_log(f"Dispatch failure: {e}")
         return False
 
 def queue_offline_alert(alert):
-    queue = []
-    if os.path.exists(QUEUE_FILE):
-        try:
-            with open(QUEUE_FILE, 'r') as f:
-                queue = json.load(f)
-        except Exception:
-            queue = []
-    queue.append(alert)
-    with open(QUEUE_FILE, 'w') as f:
-        json.dump(queue, f)
-    add_log("Offline mode: Alert queued locally in database index.")
+    """Thread-safe enqueueing of offline alerts."""
+    with queue_lock:
+        queue = []
+        if os.path.exists(QUEUE_FILE):
+            try:
+                with open(QUEUE_FILE, 'r', encoding="utf-8") as f:
+                    queue = json.load(f)
+            except Exception:
+                queue = []
+        queue.append(alert)
+        with open(QUEUE_FILE, 'w', encoding="utf-8") as f:
+            json.dump(queue, f, indent=2)
+    add_log("Offline mode: Intrusion alert queued locally.")
 
 def background_sync_worker():
+    """Background worker for retrying queued offline alerts when network is active."""
     while True:
-        if check_internet() and os.path.exists(QUEUE_FILE):
-            try:
-                with open(QUEUE_FILE, 'r') as f:
-                    queue = json.load(f)
+        try:
+            if check_internet() and os.path.exists(QUEUE_FILE):
+                with queue_lock:
+                    queue = []
+                    try:
+                        with open(QUEUE_FILE, 'r', encoding="utf-8") as f:
+                            queue = json.load(f)
+                    except Exception:
+                        queue = []
+
                 if queue:
                     add_log(f"Network Active: Syncing {len(queue)} offline alert(s)...")
                     remaining = []
                     for item in queue:
                         if send_alert_payload(item):
-                            add_log(f"Synced queued alert from {item['timestamp']}")
+                            add_log(f"Synced queued alert from {item.get('timestamp')}")
                         else:
                             remaining.append(item)
-                    with open(QUEUE_FILE, 'w') as f:
-                        json.dump(remaining, f)
-            except Exception as e:
-                add_log(f"Sync Engine Error: {e}")
+
+                    with queue_lock:
+                        with open(QUEUE_FILE, 'w', encoding="utf-8") as f:
+                            json.dump(remaining, f, indent=2)
+
+                    # Now that synced files are dispatched, clean up any storage over ceiling
+                    enforce_fifo_storage()
+        except Exception as e:
+            add_log(f"Sync Engine Error: {e}")
         time.sleep(10)
 
-Thread(target=background_sync_worker, daemon=True).start()
+threading.Thread(target=background_sync_worker, daemon=True).start()
 
-# --- STREAM GENERATOR WITH YOLO DETECTION ---
+# --- DECOUPLED VIDEO CAPTURE & AI PROCESSING ENGINE ---
 
-def generate_frames():
-    global streak_count, last_alert_time, current_camera_index, cap
+class VideoProcessingEngine:
+    """
+    Dedicated background camera capture & YOLO detection engine.
+    Eliminates camera device collisions, prevents multi-tab stream contention,
+    and isolates AI inference from the Flask HTTP response cycle.
+    """
+    def __init__(self, camera_index=0):
+        self.camera_index = camera_index
+        self.cap = None
+        self.is_running = True
+        self.latest_jpeg = None
+        self.streak_count = 0
+        self.last_alert_time = 0
+        self.frame_width = 0
+        self.frame_height = 0
+        self.is_camera_active = False
 
-    if cap is None or not cap.isOpened():
-        cap = get_camera_stream(current_camera_index)
-        add_log(f"Initialized stream on Camera Index {current_camera_index}")
+        add_log("Loading YOLOv8 model...")
+        self.model = YOLO('yolov8n.pt')
+        self._init_camera()
 
-    while True:
-        if cap is not None and cap.isOpened():
+        self.worker_thread = threading.Thread(target=self._run_loop, daemon=True)
+        self.worker_thread.start()
+
+    def _init_camera(self):
+        with camera_lock:
+            if self.cap is not None:
+                try:
+                    self.cap.release()
+                except Exception:
+                    pass
+                self.cap = None
+
+            # Attempt DirectShow first (preferred on Windows), then Media Foundation / default
+            self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
+            if not self.cap.isOpened():
+                self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_MSMF)
+            if not self.cap.isOpened():
+                self.cap = cv2.VideoCapture(self.camera_index)
+
+            if self.cap.isOpened():
+                self.is_camera_active = True
+                self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 640)
+                self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 480)
+                add_log(f"Camera {self.camera_index} initialized ({self.frame_width}x{self.frame_height}).")
+            else:
+                self.is_camera_active = False
+                add_log(f"[WARN] Failed to open Camera {self.camera_index}.")
+
+    def switch_camera(self, new_index):
+        with camera_lock:
+            if self.camera_index == new_index and self.is_camera_active:
+                return True
+            self.camera_index = new_index
+            self.streak_count = 0
+            self.latest_jpeg = None
+        self._init_camera()
+        return self.is_camera_active
+
+    def _run_loop(self):
+        consecutive_drops = 0
+        while self.is_running:
+            frame = None
+            with camera_lock:
+                if self.cap is not None and self.cap.isOpened():
+                    ret, raw_frame = self.cap.read()
+                    if ret and raw_frame is not None and raw_frame.size > 0:
+                        frame = raw_frame
+                        consecutive_drops = 0
+                    else:
+                        consecutive_drops += 1
+                else:
+                    consecutive_drops += 1
+
+            if frame is None:
+                # Generate placeholder frame when camera is not ready
+                if consecutive_drops >= 10:
+                    self.is_camera_active = False
+                    placeholder = np.zeros((480, 640, 3), dtype=np.uint8)
+                    cv2.putText(placeholder, f"CAM {self.camera_index} OFFLINE / CONNECTING...",
+                                (60, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    _, buf = cv2.imencode('.jpg', placeholder)
+                    with state_lock:
+                        self.latest_jpeg = buf.tobytes()
+                    time.sleep(1.0)
+                    self._init_camera()
+                else:
+                    time.sleep(0.05)
+                continue
+
+            self.is_camera_active = True
+            self.frame_width = frame.shape[1]
+            self.frame_height = frame.shape[0]
+
+            # 1. Run YOLO Object Detection (Person class = 0)
             try:
-                success, frame = cap.read()
-                if not success or frame is None:
-                    cv2.waitKey(10)
-                    continue
-
-                # Run YOLO Inference
-                results = model(frame, verbose=False)[0]
+                results = self.model(frame, verbose=False)[0]
                 person_detected = False
 
                 for box in results.boxes:
@@ -205,369 +282,140 @@ def generate_frames():
                         person_detected = True
                         x1, y1, x2, y2 = map(int, box.xyxy[0])
                         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        cv2.putText(frame, f"Person: {conf:.2f}", (x1, y1 - 10),
+                        cv2.putText(frame, f"Person: {conf:.2f}", (x1, max(15, y1 - 10)),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
+                # 2. Update Q2JK Streak Counter
                 if person_detected:
-                    streak_count += 1
+                    self.streak_count += 1
                 else:
-                    streak_count = 0
+                    self.streak_count = 0
 
-                cv2.putText(frame, f"Streak: {streak_count}/{REQUIRED_STREAK}", (20, 40),
+                # 3. Status Overlay
+                cv2.putText(frame, f"Streak: {self.streak_count}/{REQUIRED_STREAK}", (20, 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
 
-                if streak_count >= REQUIRED_STREAK:
+                # 4. Trigger Intrusion Event
+                if self.streak_count >= REQUIRED_STREAK:
                     cv2.putText(frame, "INTRUSION CONFIRMED!", (20, 80),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
 
                     now = time.time()
-                    if (now - last_alert_time) > ALERT_COOLDOWN:
-                        last_alert_time = now
+                    if (now - self.last_alert_time) > ALERT_COOLDOWN:
+                        self.last_alert_time = now
                         timestamp_str = time.strftime("%Y%m%d_%H%M%S")
                         img_path = os.path.join(STORAGE_DIR, f"intruder_{timestamp_str}.jpg")
 
+                        # Save snapshot evidence
                         cv2.imwrite(img_path, frame)
                         enforce_fifo_storage()
 
                         alert_data = {
                             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                            "message": f"🚨 INTRUSION CONFIRMED!\nStreak: {streak_count} consecutive frames.",
+                            "message": f"🚨 INTRUSION CONFIRMED!\nCamera: {self.camera_index}\nStreak: {self.streak_count} consecutive frames.",
                             "image_path": img_path
                         }
+
                         if check_internet():
                             add_log("Dispatching Telegram push notification...")
-                            Thread(target=send_alert_payload, args=(alert_data,)).start()
+                            threading.Thread(target=send_alert_payload, args=(alert_data,), daemon=True).start()
                         else:
                             queue_offline_alert(alert_data)
 
-                # Encode Frame for Web Display
-                ret, buffer = cv2.imencode('.jpg', frame)
-                if not ret:
-                    continue
-
-                frame_bytes = buffer.tobytes()
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-
             except Exception as e:
-                add_log(f"Frame Processing Exception: {e}")
-                break
-        else:
-            time.sleep(0.1)
+                add_log(f"Inference Loop Error: {e}")
 
-# --- WEB UI & ROUTING ---
+            # 5. Compress to JPEG for Web Stream
+            ret, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if ret:
+                with state_lock:
+                    self.latest_jpeg = buf.tobytes()
 
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🛡️ Smart IDS Portal</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --bg-primary: #0a0e14;
-            --bg-secondary: #121721;
-            --bg-card: #161b26;
-            --bg-elevated: #1c2230;
-            --border-color: #232a3a;
-            --border-hover: #2f3849;
-            --accent: #00d9ff;
-            --accent-glow: rgba(0, 217, 255, 0.15);
-            --success: #00e676;
-            --warning: #ffb300;
-            --danger: #ff3b5c;
-            --text-primary: #e6edf3;
-            --text-secondary: #8b98a9;
-            --text-muted: #5a6678;
-            --shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-        }
+            # Slight sleep to control CPU load and stabilize frame pacing (~25 FPS)
+            time.sleep(0.01)
 
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+# Start Video Engine Singleton
+engine = VideoProcessingEngine(camera_index=DEFAULT_CAM_INDEX)
 
-        body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            min-height: 100vh;
-            background-image:
-                radial-gradient(circle at 10% 0%, rgba(0, 217, 255, 0.08) 0%, transparent 40%),
-                radial-gradient(circle at 90% 100%, rgba(255, 59, 92, 0.06) 0%, transparent 40%);
-            background-attachment: fixed;
-        }
+# --- SAFE CAMERA HARDWARE DISCOVERY ---
 
-        header {
-            padding: 24px 40px;
-            border-bottom: 1px solid var(--border-color);
-            background: rgba(18, 23, 33, 0.7);
-            backdrop-filter: blur(20px);
-            position: sticky;
-            top: 0;
-            z-index: 100;
-        }
+_camera_cache = {"data": None, "ts": 0}
 
-        .header-content {
-            max-width: 1500px;
-            margin: 0 auto;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            flex-wrap: wrap;
-            gap: 16px;
-        }
+def get_available_cameras(max_tested=8, ttl=15):
+    """
+    Safely probes connected cameras.
+    CRITICAL FIX: Skips the currently active camera index to avoid hardware resource
+    lockouts and crashes in Windows / DirectShow / MSMF.
+    """
+    now = time.time()
+    if _camera_cache["data"] is not None and (now - _camera_cache["ts"]) < ttl:
+        return _camera_cache["data"]
 
-        .logo { display: flex; align-items: center; gap: 14px; }
-        .logo-icon {
-            width: 44px; height: 44px; border-radius: 12px;
-            background: linear-gradient(135deg, var(--accent), #0077ff);
-            display: flex; align-items: center; justify-content: center;
-            font-size: 22px; box-shadow: 0 0 24px var(--accent-glow);
-        }
+    active_cams = []
+    current_idx = engine.camera_index
 
-        .logo-text h1 { font-size: 18px; font-weight: 700; letter-spacing: -0.3px; }
-        .logo-text p { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+    # Report active camera first from engine state without probing
+    if engine.is_camera_active:
+        active_cams.append({
+            "index": current_idx,
+            "status": "Active Feed",
+            "resolution": f"{engine.frame_width}x{engine.frame_height}",
+            "brightness": "Online"
+        })
 
-        .status-pill {
-            display: flex; align-items: center; gap: 10px;
-            padding: 8px 16px; background: var(--bg-elevated);
-            border: 1px solid var(--border-color); border-radius: 100px;
-            font-size: 13px; font-weight: 500;
-        }
+    for index in range(max_tested):
+        if index == current_idx:
+            continue  # Do not open the device that is already actively capturing!
 
-        .status-dot {
-            width: 8px; height: 8px; border-radius: 50%;
-            background: var(--success); box-shadow: 0 0 12px var(--success);
-            animation: pulse 2s infinite;
-        }
+        temp_cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+        if not temp_cap.isOpened():
+            temp_cap = cv2.VideoCapture(index, cv2.CAP_MSMF)
+        if not temp_cap.isOpened():
+            temp_cap = cv2.VideoCapture(index)
 
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+        if temp_cap.isOpened():
+            ret, frame = temp_cap.read()
+            if ret and frame is not None and frame.size > 0:
+                mean_val = float(np.mean(frame))
+                std_val = float(np.std(frame))
+                if mean_val > 5 and std_val > 2:
+                    active_cams.append({
+                        "index": index,
+                        "status": "Available",
+                        "resolution": f"{frame.shape[1]}x{frame.shape[0]}",
+                        "brightness": round(mean_val, 1)
+                    })
+            temp_cap.release()
 
-        .main-container {
-            max-width: 1500px; margin: 0 auto; padding: 32px 40px;
-            display: grid; grid-template-columns: 1fr 420px; gap: 24px; align-items: start;
-        }
+    _camera_cache["data"] = active_cams
+    _camera_cache["ts"] = now
+    return active_cams
 
-        @media (max-width: 1100px) {
-            .main-container { grid-template-columns: 1fr; padding: 20px; }
-            header { padding: 16px 20px; }
-        }
+# --- STREAM GENERATOR FOR FLASK CLIENTS ---
 
-        .card {
-            background: var(--bg-card); border: 1px solid var(--border-color);
-            border-radius: 16px; overflow: hidden; box-shadow: var(--shadow);
-        }
+def generate_frames():
+    """
+    Multi-client safe stream generator.
+    Clients simply read the latest JPEG buffer without contending for camera hardware.
+    """
+    last_frame = None
+    while True:
+        with state_lock:
+            jpeg = engine.latest_jpeg
 
-        .card-header {
-            padding: 18px 22px; border-bottom: 1px solid var(--border-color);
-            display: flex; align-items: center; justify-content: space-between; background: var(--bg-secondary);
-        }
-
-        .card-title { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 600; }
-
-        .controls-bar {
-            display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
-            padding: 16px 22px; background: var(--bg-secondary); border-bottom: 1px solid var(--border-color);
-        }
-
-        .control-group { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 240px; }
-        .control-group label { font-size: 12px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; }
-
-        select {
-            flex: 1; padding: 10px 14px; background: var(--bg-elevated); color: var(--text-primary);
-            border: 1px solid var(--border-color); border-radius: 10px; font-size: 13px; outline: none;
-        }
-
-        button {
-            padding: 10px 20px; background: linear-gradient(135deg, var(--accent), #0077ff);
-            color: #fff; border: none; border-radius: 10px; font-size: 13px; font-weight: 600; cursor: pointer;
-        }
-
-        .card-body { padding: 22px; }
-
-        .video-wrapper {
-            position: relative; background: #000; border-radius: 12px;
-            overflow: hidden; aspect-ratio: 4 / 3; border: 1px solid var(--border-color);
-        }
-
-        .video-wrapper img { width: 100%; height: 100%; object-fit: cover; display: block; }
-
-        .badge {
-            padding: 6px 12px; border-radius: 8px; font-size: 11px; font-weight: 700; text-transform: uppercase;
-        }
-        .badge-live { background: rgba(255, 59, 92, 0.9); color: #fff; position: absolute; top: 12px; left: 12px; }
-        .badge-cam { background: rgba(0, 0, 0, 0.6); color: var(--accent); border: 1px solid rgba(0, 217, 255, 0.3); }
-
-        .logs-container {
-            background: #05070a; border-radius: 12px; border: 1px solid var(--border-color);
-            padding: 16px; height: 520px; overflow-y: auto; font-family: 'JetBrains Mono', monospace; font-size: 12px;
-        }
-
-        .log-entry { padding: 6px 10px; border-radius: 6px; margin-bottom: 2px; color: #7dd3a0; }
-        .log-entry.error { color: #ff6b8a; background: rgba(255, 59, 92, 0.05); }
-        .log-entry.warning { color: #ffd54f; background: rgba(255, 179, 0, 0.05); }
-
-        .stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 18px; }
-        .stat-box { background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 12px; padding: 12px; text-align: center; }
-        .stat-label { font-size: 10px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px; }
-        .stat-value { font-size: 18px; font-weight: 700; color: var(--accent); font-family: 'JetBrains Mono', monospace; }
-
-        footer { text-align: center; padding: 30px; color: var(--text-muted); font-size: 12px; margin-top: 40px; }
-    </style>
-</head>
-<body>
-    <header>
-        <div class="header-content">
-            <div class="logo">
-                <div class="logo-icon">🛡️</div>
-                <div class="logo-text">
-                    <h1>Smart IDS Portal</h1>
-                    <p>AI-Powered Intrusion Detection System</p>
-                </div>
-            </div>
-            <div class="status-pill">
-                <span class="status-dot"></span>
-                <span id="systemStatus">System Online</span>
-            </div>
-        </div>
-    </header>
-
-    <main class="main-container">
-        <section class="card">
-            <div class="card-header">
-                <div class="card-title"><span>📹 Live Detection Stream</span></div>
-                <span class="badge badge-cam" id="activeCamBadge">CAM 0</span>
-            </div>
-
-            <div class="controls-bar">
-                <div class="control-group">
-                    <label>Feed</label>
-                    <select id="cameraSelect">
-                        <option value="">Scanning devices...</option>
-                    </select>
-                </div>
-                <button onclick="changeCamera()">🔄 Switch Feed</button>
-            </div>
-
-            <div class="card-body">
-                <div class="video-wrapper">
-                    <span class="badge badge-live">LIVE</span>
-                    <img id="streamImg" src="/video_feed" alt="Live Stream">
-                </div>
-
-                <div class="stats-row">
-                    <div class="stat-box">
-                        <div class="stat-label">Active Cam</div>
-                        <div class="stat-value" id="statCamera">0</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-label">Streak</div>
-                        <div class="stat-value" id="statStreak">0/3</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-label">Storage</div>
-                        <div class="stat-value" id="statStorage">0/10</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-label">Queue</div>
-                        <div class="stat-value" id="statQueue">0</div>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <section class="card">
-            <div class="card-header">
-                <div class="card-title"><span>📋 Activity Logs</span></div>
-                <span class="badge badge-cam" id="logCount">0</span>
-            </div>
-            <div class="card-body">
-                <div class="logs-container" id="logs"></div>
-            </div>
-        </section>
-    </main>
-
-    <footer>Smart Intrusion Detection System &middot; Powered by YOLOv8 + OpenCV</footer>
-
-    <script>
-        function loadCameras() {
-            fetch('/api/cameras')
-                .then(res => res.json())
-                .then(data => {
-                    const select = document.getElementById('cameraSelect');
-                    select.innerHTML = '';
-                    if (!data.cameras || data.cameras.length === 0) {
-                        select.innerHTML = '<option value="0">No Active Feeds (Default: 0)</option>';
-                    } else {
-                        data.cameras.forEach(cam => {
-                            const opt = document.createElement('option');
-                            opt.value = cam.index;
-                            opt.textContent = `Camera ${cam.index} · ${cam.resolution}` + (cam.index === data.current ? '  ✓ ACTIVE' : '');
-                            if (cam.index === data.current) opt.selected = true;
-                            select.appendChild(opt);
-                        });
-                    }
-                    document.getElementById('statCamera').textContent = data.current;
-                    document.getElementById('activeCamBadge').textContent = 'CAM ' + data.current;
-                });
-        }
-
-        function changeCamera() {
-            const index = document.getElementById('cameraSelect').value;
-            fetch('/api/set_camera', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ camera_index: parseInt(index) })
-            })
-            .then(res => res.json())
-            .then(data => {
-                if (data.success) {
-                    document.getElementById('streamImg').src = '/video_feed?t=' + new Date().getTime();
-                    loadCameras();
-                }
-            });
-        }
-
-        function fetchStats() {
-            fetch('/api/stats')
-                .then(r => r.json())
-                .then(data => {
-                    document.getElementById('statStreak').textContent = `${data.streak}/${data.required_streak}`;
-                    document.getElementById('statStorage').textContent = `${data.storage_count}/${data.max_storage}`;
-                    document.getElementById('statQueue').textContent = data.queue_size;
-                });
-        }
-
-        function updateLogs() {
-            fetch('/api/logs')
-                .then(r => r.json())
-                .then(data => {
-                    const container = document.getElementById('logs');
-                    const logs = data.logs || [];
-                    document.getElementById('logCount').textContent = logs.length;
-                    container.innerHTML = logs.map(line => `<div class="log-entry">${line}</div>`).join('');
-                });
-        }
-
-        loadCameras();
-        updateLogs();
-        fetchStats();
-
-        setInterval(updateLogs, 1000);
-        setInterval(fetchStats, 1000);
-        setInterval(loadCameras, 10000);
-    </script>
-</body>
-</html>
-"""
+        if jpeg is not None and jpeg != last_frame:
+            last_frame = jpeg
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + jpeg + b'\r\n')
+        
+        # Pacing to ~25-30 FPS per client
+        time.sleep(0.035)
 
 # --- ROUTES ---
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    return render_template('index.html')
 
 @app.route('/video_feed')
 def video_feed():
@@ -575,50 +423,49 @@ def video_feed():
 
 @app.route('/api/logs')
 def get_logs():
-    with lock:
+    with state_lock:
         return jsonify({"logs": latest_logs})
 
 @app.route('/api/stats')
 def get_stats():
-    """Exposes live stats for the UI dashboard."""
-    global streak_count, current_camera_index
-    with lock:
+    """Exposes real-time system metrics for the web UI."""
+    with queue_lock:
         queue_len = 0
         if os.path.exists(QUEUE_FILE):
             try:
-                with open(QUEUE_FILE, 'r') as f:
+                with open(QUEUE_FILE, 'r', encoding="utf-8") as f:
                     queue_len = len(json.load(f))
             except Exception:
                 queue_len = 0
 
-        return jsonify({
-            "streak": streak_count,
-            "required_streak": REQUIRED_STREAK,
-            "camera": current_camera_index,
-            "storage_count": len(glob.glob(os.path.join(STORAGE_DIR, "*.jpg"))),
-            "max_storage": MAX_STORAGE_FILES,
-            "queue_size": queue_len,
-        })
+    return jsonify({
+        "streak": engine.streak_count,
+        "required_streak": REQUIRED_STREAK,
+        "camera": engine.camera_index,
+        "is_running": engine.is_camera_active,
+        "storage_count": len(glob.glob(os.path.join(STORAGE_DIR, "*.jpg"))),
+        "max_storage": MAX_STORAGE_FILES,
+        "queue_size": queue_len,
+    })
 
 @app.route('/api/cameras')
 def get_cameras():
-    cams = get_available_cameras_cached()
-    return jsonify({"cameras": cams, "current": current_camera_index})
+    cams = get_available_cameras()
+    return jsonify({"cameras": cams, "current": engine.camera_index})
 
 @app.route('/api/set_camera', methods=['POST'])
 def set_camera():
-    global current_camera_index, cap
     data = request.get_json() or {}
     new_index = data.get('camera_index')
 
     if new_index is not None:
         try:
             new_index = int(new_index)
-            release_camera_safely()
-            current_camera_index = new_index
-            cap = get_camera_stream(current_camera_index)
-            add_log(f"Switched active video stream to Camera Index: {current_camera_index}")
-            return jsonify({"success": True, "active": current_camera_index})
+            success = engine.switch_camera(new_index)
+            # Invalidate cache so UI picks up new active camera status
+            _camera_cache["ts"] = 0
+            add_log(f"Switched active video stream to Camera Index: {new_index}")
+            return jsonify({"success": success, "active": new_index})
         except Exception as e:
             add_log(f"Failed to switch camera: {e}")
             return jsonify({"success": False, "error": str(e)}), 500
@@ -626,4 +473,5 @@ def set_camera():
     return jsonify({"success": False, "message": "Missing camera_index"}), 400
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    add_log("=== Starting Smart IDS Simulation Server ===")
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)

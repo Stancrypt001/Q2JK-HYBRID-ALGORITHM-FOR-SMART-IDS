@@ -19,15 +19,32 @@ else:
     user_input = input("Enter Camera Index (default 9): ").strip()
     CAMERA_INDEX = int(user_input) if user_input.isdigit() else 9
 
+import os
+
+def load_env_file(filepath=".env"):
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        os.environ.setdefault(k.strip(), v.strip())
+        except Exception:
+            pass
+
+load_env_file()
+
 # ==========================================
 # CONFIGURATION & Q2JK PARAMETERS
 # ==========================================
-CONFIDENCE_THRESHOLD = 0.50  # Stage 1: AI Confidence (>50%)
-REQUIRED_STREAK = 3          # Stage 2: Must detect person for 3 consecutive frames
+CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", 0.50))
+REQUIRED_STREAK = int(os.getenv("REQUIRED_STREAK", 3))
+ALERT_COOLDOWN = float(os.getenv("ALERT_COOLDOWN", 10))
 
-# Telegram Bot Setup (Optional: Replace with your actual credentials)
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
-CHAT_ID = "YOUR_CHAT_ID_HERE"
+# Telegram Bot Setup
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID_HERE")
 
 def send_telegram_alert(frame_image, message):
     """Sends photo evidence and caption to Telegram."""

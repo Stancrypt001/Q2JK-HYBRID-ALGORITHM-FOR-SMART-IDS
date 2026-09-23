@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🛡️ Smart IDS Portal</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0e14;
+            --bg-secondary: #121721;
+            --bg-card: #161b26;
+            --bg-elevated: #1c2230;
+            --border-color: #232a3a;
+            --border-hover: #2f3849;
+            --accent: #00d9ff;
+            --accent-glow: rgba(0, 217, 255, 0.15);
+            --success: #00e676;
+            --warning: #ffb300;
+            --danger: #ff3b5c;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b98a9;
+            --text-muted: #5a6678;
+            --shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            background-image:
+                radial-gradient(circle at 10% 0%, rgba(0, 217, 255, 0.08) 0%, transparent 40%),
+                radial-gradient(circle at 90% 100%, rgba(255, 59, 92, 0.06) 0%, transparent 40%);
+            background-attachment: fixed;
+        }
+
+        header {
+            padding: 20px 40px;
+            border-bottom: 1px solid var(--border-color);
+            background: rgba(18, 23, 33, 0.7);
+            backdrop-filter: blur(20px);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .header-content {
+            max-width: 1500px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .logo { display: flex; align-items: center; gap: 14px; }
+        .logo-icon {
+            width: 44px; height: 44px; border-radius: 12px;
+            background: linear-gradient(135deg, var(--accent), #0077ff);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 22px; box-shadow: 0 0 24px var(--accent-glow);
+        }
+
+        .logo-text h1 { font-size: 18px; font-weight: 700; letter-spacing: -0.3px; }
+        .logo-text p { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+
+        .header-badges { display: flex; align-items: center; gap: 12px; }
+
+        .status-pill {
+            display: flex; align-items: center; gap: 10px;
+            padding: 8px 16px; background: var(--bg-elevated);
+            border: 1px solid var(--border-color); border-radius: 100px;
+            font-size: 13px; font-weight: 500;
+        }
+
+        .status-dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: var(--success); box-shadow: 0 0 12px var(--success);
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.offline {
+            background: var(--danger);
+            box-shadow: 0 0 12px var(--danger);
+        }
+
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+        .main-container {
+            max-width: 1500px; margin: 0 auto; padding: 32px 40px;
+            display: grid; grid-template-columns: 1fr 420px; gap: 24px; align-items: start;
+        }
+
+        @media (max-width: 1100px) {
+            .main-container { grid-template-columns: 1fr; padding: 20px; }
+            header { padding: 16px 20px; }
+        }
+
+        .card {
+            background: var(--bg-card); border: 1px solid var(--border-color);
+            border-radius: 16px; overflow: hidden; box-shadow: var(--shadow);
+        }
+
+        .card-header {
+            padding: 18px 22px; border-bottom: 1px solid var(--border-color);
+            display: flex; align-items: center; justify-content: space-between; background: var(--bg-secondary);
+        }
+
+        .card-title { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 600; }
+
+        .controls-bar {
+            display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+            padding: 16px 22px; background: var(--bg-secondary); border-bottom: 1px solid var(--border-color);
+        }
+
+        .control-group { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 240px; }
+        .control-group label { font-size: 12px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; }
+
+        select {
+            flex: 1; padding: 10px 14px; background: var(--bg-elevated); color: var(--text-primary);
+            border: 1px solid var(--border-color); border-radius: 10px; font-size: 13px; outline: none;
+            transition: border-color 0.2s;
+        }
+        select:focus { border-color: var(--accent); }
+
+        button {
+            padding: 10px 20px; background: linear-gradient(135deg, var(--accent), #0077ff);
+            color: #fff; border: none; border-radius: 10px; font-size: 13px; font-weight: 600; cursor: pointer;
+            transition: opacity 0.2s, transform 0.1s;
+        }
+        button:hover { opacity: 0.9; }
+        button:active { transform: scale(0.98); }
+
+        .card-body { padding: 22px; }
+
+        .video-wrapper {
+            position: relative; background: #000; border-radius: 12px;
+            overflow: hidden; aspect-ratio: 4 / 3; border: 1px solid var(--border-color);
+            display: flex; align-items: center; justify-content: center;
+        }
+
+        .video-wrapper img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+        .badge {
+            padding: 6px 12px; border-radius: 8px; font-size: 11px; font-weight: 700; text-transform: uppercase;
+        }
+        .badge-live { background: rgba(255, 59, 92, 0.9); color: #fff; position: absolute; top: 12px; left: 12px; }
+        .badge-cam { background: rgba(0, 0, 0, 0.6); color: var(--accent); border: 1px solid rgba(0, 217, 255, 0.3); }
+
+        .logs-container {
+            background: #05070a; border-radius: 12px; border: 1px solid var(--border-color);
+            padding: 16px; height: 520px; overflow-y: auto; font-family: 'JetBrains Mono', monospace; font-size: 12px;
+        }
+
+        .log-entry { padding: 6px 10px; border-radius: 6px; margin-bottom: 2px; color: #7dd3a0; word-break: break-all; }
+        .log-entry.error { color: #ff6b8a; background: rgba(255, 59, 92, 0.05); }
+        .log-entry.warning { color: #ffd54f; background: rgba(255, 179, 0, 0.05); }
+
+        .stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 18px; }
+        .stat-box { background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 12px; padding: 12px; text-align: center; }
+        .stat-label { font-size: 10px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px; }
+        .stat-value { font-size: 18px; font-weight: 700; color: var(--accent); font-family: 'JetBrains Mono', monospace; }
+
+        footer { text-align: center; padding: 30px; color: var(--text-muted); font-size: 12px; margin-top: 40px; }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="header-content">
+            <div class="logo">
+                <div class="logo-icon">🛡️</div>
+                <div class="logo-text">
+                    <h1>Smart IDS Portal</h1>
+                    <p>Q2JK AI Intrusion Detection & Offline Resilience Engine</p>
+                </div>
+            </div>
+            <div class="header-badges">
+                <div class="status-pill">
+                    <span class="status-dot" id="systemStatusDot"></span>
+                    <span id="systemStatus">Engine Active</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="main-container">
+        <section class="card">
+            <div class="card-header">
+                <div class="card-title"><span>📹 Live Detection Stream</span></div>
+                <span class="badge badge-cam" id="activeCamBadge">CAM 0</span>
+            </div>
+
+            <div class="controls-bar">
+                <div class="control-group">
+                    <label>Feed</label>
+                    <select id="cameraSelect">
+                        <option value="">Scanning devices...</option>
+                    </select>
+                </div>
+                <button onclick="changeCamera()">🔄 Switch Feed</button>
+            </div>
+
+            <div class="card-body">
+                <div class="video-wrapper">
+                    <span class="badge badge-live">LIVE</span>
+                    <img id="streamImg" src="/video_feed" alt="Live Stream" onerror="handleStreamError()">
+                </div>
+
+                <div class="stats-row">
+                    <div class="stat-box">
+                        <div class="stat-label">Active Cam</div>
+                        <div class="stat-value" id="statCamera">0</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Streak</div>
+                        <div class="stat-value" id="statStreak">0/3</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Storage</div>
+                        <div class="stat-value" id="statStorage">0/10</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Offline Queue</div>
+                        <div class="stat-value" id="statQueue">0</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="card">
+            <div class="card-header">
+                <div class="card-title"><span>📋 Activity Logs</span></div>
+                <span class="badge badge-cam" id="logCount">0</span>
+            </div>
+            <div class="card-body">
+                <div class="logs-container" id="logs"></div>
+            </div>
+        </section>
+    </main>
+
+    <footer>Smart Intrusion Detection System &middot; Powered by YOLOv8 + OpenCV + Q2JK Engine</footer>
+
+    <script>
+        function loadCameras() {
+            fetch('/api/cameras')
+                .then(res => res.json())
+                .then(data => {
+                    const select = document.getElementById('cameraSelect');
+                    const curVal = select.value;
+                    select.innerHTML = '';
+                    if (!data.cameras || data.cameras.length === 0) {
+                        select.innerHTML = `<option value="${data.current}">Active Feed (Index ${data.current})</option>`;
+                    } else {
+                        data.cameras.forEach(cam => {
+                            const opt = document.createElement('option');
+                            opt.value = cam.index;
+                            opt.textContent = `Camera ${cam.index} · ${cam.resolution}` + (cam.index === data.current ? '  ✓ ACTIVE' : '');
+                            if (cam.index === data.current) opt.selected = true;
+                            select.appendChild(opt);
+                        });
+                    }
+                    document.getElementById('statCamera').textContent = data.current;
+                    document.getElementById('activeCamBadge').textContent = 'CAM ' + data.current;
+                })
+                .catch(err => console.error("Error loading cameras:", err));
+        }
+
+        function changeCamera() {
+            const index = document.getElementById('cameraSelect').value;
+            fetch('/api/set_camera', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ camera_index: parseInt(index) })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    setTimeout(() => {
+                        document.getElementById('streamImg').src = '/video_feed?t=' + Date.now();
+                        loadCameras();
+                    }, 500);
+                } else {
+                    alert("Camera switch failed: " + (data.error || data.message));
+                }
+            })
+            .catch(err => console.error("Failed to switch camera:", err));
+        }
+
+        function handleStreamError() {
+            console.warn("Stream error encountered. Retrying in 2 seconds...");
+            setTimeout(() => {
+                document.getElementById('streamImg').src = '/video_feed?t=' + Date.now();
+            }, 2000);
+        }
+
+        function fetchStats() {
+            fetch('/api/stats')
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('statStreak').textContent = `${data.streak}/${data.required_streak}`;
+                    document.getElementById('statStorage').textContent = `${data.storage_count}/${data.max_storage}`;
+                    document.getElementById('statQueue').textContent = data.queue_size;
+                    
+                    const dot = document.getElementById('systemStatusDot');
+                    const statusText = document.getElementById('systemStatus');
+                    if (data.is_running) {
+                        dot.className = "status-dot";
+                        statusText.textContent = "Engine Active";
+                    } else {
+                        dot.className = "status-dot offline";
+                        statusText.textContent = "Camera Offline";
+                    }
+                })
+                .catch(err => console.error("Error fetching stats:", err));
+        }
+
+        function updateLogs() {
+            fetch('/api/logs')
+                .then(r => r.json())
+                .then(data => {
+                    const container = document.getElementById('logs');
+                    const logs = data.logs || [];
+                    document.getElementById('logCount').textContent = logs.length;
+                    
+                    const rendered = logs.map(line => {
+                        let cls = 'log-entry';
+                        if (line.includes('[ERROR]') || line.includes('Error') || line.includes('failure')) cls += ' error';
+                        else if (line.includes('[WARN]') || line.includes('INTRUSION')) cls += ' warning';
+                        return `<div class="${cls}">${line}</div>`;
+                    }).join('');
+                    
+                    container.innerHTML = rendered;
+                    container.scrollTop = container.scrollHeight;
+                })
+                .catch(err => console.error("Error fetching logs:", err));
+        }
+
+        loadCameras();
+        updateLogs();
+        fetchStats();
+
+        setInterval(updateLogs, 1000);
+        setInterval(fetchStats, 1000);
+        setInterval(loadCameras, 15000);
+    </script>
+</body>
+</html>
