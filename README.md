@@ -20,9 +20,14 @@ An AI-powered Smart Intrusion Detection System built with Python, OpenCV, YOLOv8
 
 ```text
 smart_ids_simulation/
-├── app.py                      # Main system application and Flask server
+├── app.py                      # Main system application & decoupled video engine
+├── camera.py                   # Thread-safe camera reconnection manager
+├── main_simulation.py          # Standalone simulation script
 ├── offline_alert_queue.json    # Auto-generated offline message queue
 ├── captured_events/            # Directory for saved intrusion snapshots
+├── templates/
+│   └── index.html              # Responsive web dashboard frontend
+├── .env.example                # Sample environment configuration file
 └── README.md                   # Project documentation
 ```
 
@@ -45,8 +50,8 @@ Follow these steps step-by-step to set up and run the application.
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/<your-username>/<your-repository-name>.git
-cd <your-repository-name>
+git clone https://github.com/Stancrypt001/Q2JK-HYBRID-ALGORITHM-FOR-SMART-IDS.git
+cd Q2JK-HYBRID-ALGORITHM-FOR-SMART-IDS
 ```
 
 ### 2. Set Up a Virtual Environment (Recommended)
@@ -79,27 +84,28 @@ pip install opencv-python ultralytics flask requests numpy
 
 ## ⚙️ Configuration
 
-Open `app.py` in your code editor to customize system settings:
+Copy the sample environment file to create your local `.env`:
 
-### Telegram Alert Setup
-
-To receive alert notifications on your phone, replace the placeholders with your credentials:
-
-```python
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Replace with your Telegram Bot Token
-CHAT_ID = "YOUR_CHAT_ID_HERE"      # Replace with your Telegram Chat ID
+```bash
+cp .env.example .env
 ```
 
-> If left as default, alerts will be simulated in the console logs.
+Open `.env` in your editor to customize your settings:
 
-### Detection & Storage Thresholds
+```ini
+# Telegram Alert Setup (Optional)
+TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN_HERE
+TELEGRAM_CHAT_ID=YOUR_CHAT_ID_HERE
 
-```python
-CONFIDENCE_THRESHOLD = 0.50   # Minimum YOLO confidence score for person class
-REQUIRED_STREAK = 3          # Consecutive frames required to confirm intrusion
-ALERT_COOLDOWN = 10          # Cooldown time (in seconds) between alerts
-MAX_STORAGE_FILES = 10       # Maximum stored snapshot images (FIFO purge)
+# Detection & Storage Thresholds
+CONFIDENCE_THRESHOLD=0.50   # Minimum YOLO confidence score for person class
+REQUIRED_STREAK=3          # Consecutive frames required to confirm intrusion
+ALERT_COOLDOWN=10          # Cooldown time (in seconds) between alerts
+MAX_STORAGE_FILES=10       # Maximum stored snapshot images (FIFO purge)
+DEFAULT_CAMERA_INDEX=0     # Default starting camera feed
 ```
+
+> If left with placeholder values, alerts will be simulated in the console logs.
 
 ---
 
